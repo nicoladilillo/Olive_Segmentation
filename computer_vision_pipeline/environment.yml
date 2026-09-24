@@ -1,0 +1,12 @@
+name: olive-segmentation-cv
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - opencv
+  - pillow
+  - matplotlib
+  - scipy
+  - scikit-image
+  - scikit-learn
