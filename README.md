@@ -43,7 +43,7 @@ olive mask.
 ```bash
 source .venv/bin/activate
 python sam_pipeline/olive_instance_segmentation.py \
-  images/olives.jpg images/olives.png
+  images/olives.jpg images/olives.png images/belt.jpg 
 ```
 
 See [`sam_pipeline/README.md`](sam_pipeline/README.md) for output details and

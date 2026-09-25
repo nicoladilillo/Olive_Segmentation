@@ -1,4 +1,5 @@
 import argparse
+import time
 from pathlib import Path
 
 import cv2
@@ -13,6 +14,7 @@ from sklearn.neighbors import KNeighborsClassifier
 
 
 def run_pipeline(input_path: str, output_dir: str):
+    pipeline_start = time.perf_counter()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -524,6 +526,7 @@ def run_pipeline(input_path: str, output_dir: str):
     print(f"KNN background seed pixels: {len(background_idx)}")
     print(f"Selected olive regions: {n}")
     print(f"Results saved in: {output_dir.resolve()}")
+    print(f"Total processing time: {time.perf_counter() - pipeline_start:.2f}s")
 
 
 if __name__ == "__main__":

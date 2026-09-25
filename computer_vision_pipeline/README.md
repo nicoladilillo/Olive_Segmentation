@@ -42,7 +42,8 @@ python computer_vision_pipeline/olive_segmentation_knn_filled.py images/olives.p
 
 Default outputs remain inside `computer_vision_pipeline/results/`, with one
 subdirectory per method. Existing JPG and PNG experiments are stored there as
-well.
+well. Each command prints its total wall-clock processing time after the output
+files have been written.
 
 ## Limitation
 

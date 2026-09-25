@@ -1,4 +1,5 @@
 import argparse
+import time
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,6 +12,7 @@ from pathlib import Path
 
 
 def run_pipeline(input_path: str, output_dir: str):
+    pipeline_start = time.perf_counter()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -443,6 +445,7 @@ def run_pipeline(input_path: str, output_dir: str):
 
     print(f"Selected olive regions: {n}")
     print(f"Results saved in: {output_dir.resolve()}")
+    print(f"Total processing time: {time.perf_counter() - pipeline_start:.2f}s")
 
 
 if __name__ == "__main__":

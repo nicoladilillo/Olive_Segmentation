@@ -46,6 +46,9 @@ Each image receives its own output directory under `sam_pipeline/results/`
 - `instances.json`: score, area, bounding box, and centroid for each instance.
 - `specular_diagnostic.png`: detected bright/low-saturation glare pixels.
 
+For every input image, the command also prints separate wall-clock times for
+SAM inference, post-processing/export, and the complete operation.
+
 The masks cover only pixels visible in the photograph. Recovering the hidden
 part of an olive underneath another olive is an amodal-segmentation problem and
 cannot be measured reliably from one image without a trained amodal model or

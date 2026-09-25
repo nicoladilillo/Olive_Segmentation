@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import colorsys
 import json
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import List, Sequence, Tuple
@@ -388,7 +389,7 @@ def main() -> None:
         "imgsz": args.imgsz,
         "conf": args.confidence,
         # Dense scenes contain adjacent objects whose *boxes* overlap heavily.
-        "iou": 0.95,
+        "iou": 0.85,
         "device": device,
         "verbose": False,
         "save": False,
@@ -403,10 +404,21 @@ def main() -> None:
     # The current SAM predictor accepts one source image per call, but the model
     # remains loaded in the predictor and is reused across calls.
     for path in args.images:
+        image_start = time.perf_counter()
         result = predictor(source=str(path))[0]
+        inference_end = time.perf_counter()
         count = build_outputs(path, result, args.output, draw_ids=not args.no_ids)
+        processing_end = time.perf_counter()
+
+        inference_seconds = inference_end - image_start
+        export_seconds = processing_end - inference_end
+        total_seconds = processing_end - image_start
         image_key = f"{path.stem}_{path.suffix.lower().lstrip('.')}"
         print(f"{path}: {count} visible olive instances -> {args.output / image_key}")
+        print(
+            f"  time: inference={inference_seconds:.2f}s, "
+            f"post-processing/export={export_seconds:.2f}s, total={total_seconds:.2f}s"
+        )
 
 
 if __name__ == "__main__":
