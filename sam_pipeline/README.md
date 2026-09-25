@@ -33,6 +33,26 @@ python sam_pipeline/olive_instance_segmentation.py \
   images/olives.jpg images/olives.png
 ```
 
+### Optional overlapping tiles
+
+Add the boolean `--tile` flag to segment a large image as overlapping tiles.
+Tile size and overlap are expressed in pixels of the original image:
+
+```bash
+python sam_pipeline/olive_instance_segmentation.py images/olives.jpg \
+  --tile --tile-size 1024 --tile-overlap 128
+```
+
+Tiling is disabled unless `--tile` is present. Proposals cut by an internal
+tile boundary are rejected; the overlap gives a neighboring tile the chance to
+capture the complete olive. Duplicate masks from overlapping tiles are merged
+with mask-level NMS. Tiled outputs use an additional `_tiled` suffix so they do
+not overwrite full-image results.
+
+Use a smaller tile, such as `--tile-size 512 --tile-overlap 96`, when olives are
+very small in the original photograph. Smaller tiles enlarge those objects for
+SAM but increase the number of inference calls and therefore execution time.
+
 `sam2.1_t.pt` is downloaded automatically on first use. On Apple Silicon the
 script selects MPS; on NVIDIA it selects CUDA; otherwise it uses CPU.
 

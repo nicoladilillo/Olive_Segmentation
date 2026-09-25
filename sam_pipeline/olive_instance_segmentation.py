@@ -165,10 +165,14 @@ def mask_geometry(mask: np.ndarray) -> Tuple[int, Tuple[int, int, int, int], flo
     return area, (x1, y1, x2, y2), aspect, solidity
 
 
-def plausible_olive(mask: np.ndarray, value_channel: np.ndarray) -> bool:
+def plausible_olive(
+    mask: np.ndarray,
+    value_channel: np.ndarray,
+    reference_image_area: int | None = None,
+) -> bool:
     """Reject tiny texture masks, dark gaps, and implausibly broad regions."""
     height, width = mask.shape
-    image_area = height * width
+    image_area = reference_image_area or height * width
     area, bbox, aspect, solidity = mask_geometry(mask)
 
     min_area = max(80, round(image_area * 0.00035))
@@ -248,11 +252,131 @@ def palette_color(index: int) -> Tuple[int, int, int]:
     return int(blue * 255), int(green * 255), int(red * 255)
 
 
+def extract_candidates(
+    result,
+    bgr: np.ndarray,
+    reference_image_area: int | None = None,
+) -> List[Tuple[np.ndarray, float]]:
+    """Convert one SAM result into refined, plausible local olive masks."""
+    if result.masks is None or result.boxes is None:
+        return []
+
+    height, width = bgr.shape[:2]
+    raw_masks = result.masks.data.cpu().numpy().astype(bool)
+    scores = result.boxes.conf.cpu().numpy()
+    value_channel = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 2]
+    candidates: List[Tuple[np.ndarray, float]] = []
+
+    for raw_mask, score in zip(raw_masks, scores):
+        if raw_mask.shape != (height, width):
+            raw_mask = cv2.resize(
+                raw_mask.astype(np.uint8),
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        refined = fill_mask(raw_mask)
+        if plausible_olive(refined, value_channel, reference_image_area):
+            candidates.append((refined, float(score)))
+    return candidates
+
+
+def tile_starts(length: int, tile_size: int, overlap: int) -> List[int]:
+    """Return evenly spaced tile origins with at least the requested overlap."""
+    if length <= tile_size:
+        return [0]
+
+    stride = tile_size - overlap
+    tile_count = int(np.ceil((length - tile_size) / stride)) + 1
+    return [
+        int(round(value))
+        for value in np.linspace(0, length - tile_size, tile_count)
+    ]
+
+
+def touches_internal_tile_edge(
+    mask: np.ndarray,
+    tile_xyxy: Tuple[int, int, int, int],
+    image_shape: Tuple[int, int],
+) -> bool:
+    """Detect a proposal cut by a tile edge that is not an image edge."""
+    _, bbox, _, _ = mask_geometry(mask)
+    x1, y1, x2, y2 = bbox
+    tile_x1, tile_y1, tile_x2, tile_y2 = tile_xyxy
+    image_height, image_width = image_shape
+    tile_height, tile_width = mask.shape
+    margin = max(2, round(min(tile_height, tile_width) * 0.003))
+
+    return (
+        (tile_x1 > 0 and x1 <= margin)
+        or (tile_y1 > 0 and y1 <= margin)
+        or (tile_x2 < image_width and x2 >= tile_width - margin)
+        or (tile_y2 < image_height and y2 >= tile_height - margin)
+    )
+
+
+def predict_tiled(
+    bgr: np.ndarray,
+    predictor: DenseSAM2Predictor,
+    tile_size: int,
+    overlap: int,
+) -> Tuple[List[Tuple[np.ndarray, float]], int]:
+    """Run SAM per overlapping tile and map accepted masks to global coordinates."""
+    image_height, image_width = bgr.shape[:2]
+    x_starts = tile_starts(image_width, tile_size, overlap)
+    y_starts = tile_starts(image_height, tile_size, overlap)
+    tile_boxes = [
+        (
+            x,
+            y,
+            min(x + tile_size, image_width),
+            min(y + tile_size, image_height),
+        )
+        for y in y_starts
+        for x in x_starts
+    ]
+
+    print(
+        f"  tiled inference: {len(tile_boxes)} tiles, "
+        f"tile_size={tile_size}px, overlap={overlap}px"
+    )
+    global_candidates: List[Tuple[np.ndarray, float]] = []
+    for tile_index, (x1, y1, x2, y2) in enumerate(tile_boxes, start=1):
+        tile = bgr[y1:y2, x1:x2]
+        result = predictor(source=tile)[0]
+        # Use tile-relative size thresholds. Besides reducing memory, tiling is
+        # meant to reveal olives that are too small in the full image.
+        local_candidates = extract_candidates(result, tile)
+
+        accepted_in_tile = 0
+        for local_mask, score in local_candidates:
+            if touches_internal_tile_edge(
+                local_mask,
+                (x1, y1, x2, y2),
+                (image_height, image_width),
+            ):
+                continue
+            global_mask = np.zeros((image_height, image_width), dtype=bool)
+            global_mask[y1:y2, x1:x2] = local_mask
+            global_candidates.append((global_mask, score))
+            accepted_in_tile += 1
+
+        print(
+            f"    tile {tile_index}/{len(tile_boxes)} "
+            f"({x1}:{x2}, {y1}:{y2}): {accepted_in_tile} candidates"
+        )
+
+    return global_candidates, len(tile_boxes)
+
+
 def build_outputs(
     image_path: Path,
     result,
     output_root: Path,
     draw_ids: bool,
+    candidates: List[Tuple[np.ndarray, float]] | None = None,
+    tiled: bool = False,
+    tile_size: int | None = None,
+    tile_overlap: int | None = None,
 ) -> int:
     bgr = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
     if bgr is None:
@@ -260,26 +384,18 @@ def build_outputs(
 
     # Include the extension because `olives.jpg` and `olives.png` otherwise
     # share the same stem and would overwrite one another.
-    image_key = f"{image_path.stem}_{image_path.suffix.lower().lstrip('.')}"
+    tiled_suffix = "_tiled" if tiled else ""
+    image_key = (
+        f"{image_path.stem}_{image_path.suffix.lower().lstrip('.')}{tiled_suffix}"
+    )
     image_dir = output_root / image_key
     image_dir.mkdir(parents=True, exist_ok=True)
     height, width = bgr.shape[:2]
 
-    if result.masks is None or result.boxes is None:
-        raise RuntimeError(f"SAM produced no masks for {image_path}")
-
-    raw_masks = result.masks.data.cpu().numpy().astype(bool)
-    scores = result.boxes.conf.cpu().numpy()
-    value_channel = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)[:, :, 2]
-    candidates: List[Tuple[np.ndarray, float]] = []
-    for raw_mask, score in zip(raw_masks, scores):
-        if raw_mask.shape != (height, width):
-            raw_mask = cv2.resize(
-                raw_mask.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST
-            ).astype(bool)
-        refined = fill_mask(raw_mask)
-        if plausible_olive(refined, value_channel):
-            candidates.append((refined, float(score)))
+    if candidates is None:
+        candidates = extract_candidates(result, bgr)
+    if not candidates:
+        raise RuntimeError(f"SAM produced no valid olive masks for {image_path}")
 
     instances = suppress_duplicate_masks(candidates)
     # Predictions are ordered by confidence. The first/highest-confidence mask
@@ -349,6 +465,9 @@ def build_outputs(
                 "width": width,
                 "height": height,
                 "instance_count": len(metadata),
+                "tiled_inference": tiled,
+                "tile_size": tile_size if tiled else None,
+                "tile_overlap": tile_overlap if tiled else None,
                 "instances": [asdict(item) for item in metadata],
             },
             handle,
@@ -371,6 +490,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--points-stride", type=int, default=32)
     parser.add_argument("--confidence", type=float, default=0.80)
     parser.add_argument("--stability", type=float, default=0.90)
+    parser.add_argument(
+        "--tile",
+        action="store_true",
+        help="Enable overlapping tiled inference (disabled by default)",
+    )
+    parser.add_argument(
+        "--tile-size",
+        type=int,
+        default=1024,
+        help="Square tile size in original-image pixels (default: 1024)",
+    )
+    parser.add_argument(
+        "--tile-overlap",
+        type=int,
+        default=128,
+        help="Overlap between neighboring tiles in pixels (default: 128)",
+    )
     parser.add_argument("--no-ids", action="store_true", help="Do not draw instance IDs")
     return parser.parse_args()
 
@@ -380,6 +516,10 @@ def main() -> None:
     missing = [str(path) for path in args.images if not path.is_file()]
     if missing:
         raise FileNotFoundError("Missing input image(s): " + ", ".join(missing))
+    if args.tile_size <= 0:
+        raise ValueError("--tile-size must be greater than zero")
+    if not 0 <= args.tile_overlap < args.tile_size:
+        raise ValueError("--tile-overlap must satisfy 0 <= overlap < tile size")
 
     device = choose_device(args.device)
     overrides = {
@@ -405,15 +545,40 @@ def main() -> None:
     # remains loaded in the predictor and is reused across calls.
     for path in args.images:
         image_start = time.perf_counter()
-        result = predictor(source=str(path))[0]
+        if args.tile:
+            bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise RuntimeError(f"Could not read image: {path}")
+            candidates, _ = predict_tiled(
+                bgr,
+                predictor,
+                tile_size=args.tile_size,
+                overlap=args.tile_overlap,
+            )
+            result = None
+        else:
+            result = predictor(source=str(path))[0]
+            candidates = None
         inference_end = time.perf_counter()
-        count = build_outputs(path, result, args.output, draw_ids=not args.no_ids)
+        count = build_outputs(
+            path,
+            result,
+            args.output,
+            draw_ids=not args.no_ids,
+            candidates=candidates,
+            tiled=args.tile,
+            tile_size=args.tile_size,
+            tile_overlap=args.tile_overlap,
+        )
         processing_end = time.perf_counter()
 
         inference_seconds = inference_end - image_start
         export_seconds = processing_end - inference_end
         total_seconds = processing_end - image_start
-        image_key = f"{path.stem}_{path.suffix.lower().lstrip('.')}"
+        tiled_suffix = "_tiled" if args.tile else ""
+        image_key = (
+            f"{path.stem}_{path.suffix.lower().lstrip('.')}{tiled_suffix}"
+        )
         print(f"{path}: {count} visible olive instances -> {args.output / image_key}")
         print(
             f"  time: inference={inference_seconds:.2f}s, "

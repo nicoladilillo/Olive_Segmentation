@@ -46,6 +46,14 @@ python sam_pipeline/olive_instance_segmentation.py \
   images/olives.jpg images/olives.png images/belt.jpg 
 ```
 
+For optional overlapping tiled inference on large images, add the boolean
+`--tile` flag and configure the overlap in pixels:
+
+```bash
+python sam_pipeline/olive_instance_segmentation.py images/olives.jpg \
+  --tile --tile-size 1024 --tile-overlap 128
+```
+
 See [`sam_pipeline/README.md`](sam_pipeline/README.md) for output details and
 parameters.
 
